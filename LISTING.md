@@ -7,8 +7,8 @@ url: https://github.com/liuhange789/dsh-plugin-profiler
 name: liuhange789/dsh-plugin-profiler
 category: tools
 description:
-  en: '`/diet` prints a four-line bill for your plugin install: context tokens per request, hot-path host time outside the tool body, listener fan-out per plugin, and which three plugins to look at first — plus per-tool context pricing and a live listener map. Reads the running event bus and tool registry only: no patching of other plugins, no file writes, no network calls. The boundary is printed on the card: rc.7 has no per-listener timing, so the cut list is fan-out, not per-plugin milliseconds.'
-  zh: 'DSH 插件税体检。`/diet` 打印一张四行账单：每次请求的工具体定义占多少 token、热路径上工具体之外的宿主耗时、每个插件在热路径上挂了多少监听器、先看哪三个插件；另附逐工具上下文成本与实时监听器地图。只读运行中的事件总线与工具注册表，不修改其他插件，不写文件，不发网络请求。边界直接印在卡片上：rc.7 没有逐监听器耗时接口，“先拆谁”给的是监听器扇出，不是逐插件毫秒数。'
+  en: '`/diet` prints a four-line bill for your plugin install: context tokens per request, hot-path host time outside the tool body, listener fan-out per plugin, and which three plugins to look at first — plus per-tool context pricing and a live listener map. Reads the running event bus and tool registry only: no patching of other plugins, no file writes, no network calls. The boundary is printed on the card: rc.7 has no per-listener timing, so the cut list is fan-out, not per-plugin milliseconds. It never throws into the host: a missing service, a taken command name, circular tool parameters or a throwing registry degrade one section, not the session.'
+  zh: 'DSH 插件税体检。`/diet` 打印一张四行账单：每次请求的工具体定义占多少 token、热路径上工具体之外的宿主耗时、每个插件在热路径上挂了多少监听器、先看哪三个插件；另附逐工具上下文成本与实时监听器地图。只读运行中的事件总线与工具注册表，不修改其他插件，不写文件，不发网络请求。边界直接印在卡片上：rc.7 没有逐监听器耗时接口，“先拆谁”给的是监听器扇出，不是逐插件毫秒数。它不会把异常抛给宿主：服务缺失、命令名被占、工具参数循环引用或注册表报错，都只少一段报告，不影响会话。'
 ```
 
 ## Tagline candidates
@@ -41,7 +41,7 @@ The sample above is illustrative; the README uses a real run from the test suite
 
 ## Submission checklist
 
-- [x] `npm test` — 5/5 against rc.7 (real vendored cordis runtime)
+- [x] `npm test` — 10/10 against rc.7 (real vendored cordis runtime, hostile-input cases included)
 - [x] npm package name `dsh-plugin-profiler` is unclaimed; npm identity is `liuhange`
 - [ ] GitHub repo `liuhange789/dsh-plugin-profiler` (does not exist yet; no `GITHUB_TOKEN` and no `gh` CLI on this machine)
 - [ ] `npm publish`

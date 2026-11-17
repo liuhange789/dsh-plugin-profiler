@@ -20,7 +20,7 @@ async function boot(extra = {}) {
       return () => {}
     },
   }
-  ctx.provide('commands', commands)
+  if (extra.commands !== false) ctx.provide('commands', extra.commands ?? commands)
   if (extra.tools) ctx.provide('tools', extra.tools)
   ctx.plugin({ name, apply })
   await sleep(0)
@@ -115,5 +115,69 @@ test('reset clears the card', async () => {
   const after = definition.handler({ rawInput: '' })
   assert.match(after.text, /hot path  0 calls/)
   assert.match(after.text, /^(?!.*Hot chains)/s)
+  ctx.registry?.stop?.()
+})
+
+test('loads silently when the commands service is absent', async () => {
+  const { ctx } = await boot({ commands: false })
+  const outcome = await ctx.waterfall(null, 'agent/pre-step', {}, async () => 'ok')
+  assert.equal(outcome, 'ok')
+  ctx.registry?.stop?.()
+})
+
+test('keeps measuring when a command name is already taken', async () => {
+  const ctx = new Context()
+  const accepted = []
+  ctx.provide('commands', {
+    register(definition) {
+      if (accepted.some(item => item.name === definition.name)) {
+        throw new Error(`command "${definition.name}" is already registered`)
+      }
+      accepted.push(definition)
+      return () => {}
+    },
+  })
+  ctx.plugin({ name, apply })
+  await sleep(0)
+  // A second copy (duplicate install, or a reload whose old registration survived).
+  ctx.plugin({ name, apply })
+  await sleep(0)
+
+  assert.equal(accepted.length, 2, 'only the first copy should own the two commands')
+  const outcome = await ctx.waterfall(null, 'agent/pre-step', {}, async () => 'ok')
+  assert.equal(outcome, 'ok', 'the rejected copy must not break the chain')
+  ctx.registry?.stop?.()
+})
+
+test('passes through dispatches that carry no next callback', async () => {
+  const { ctx } = await boot()
+  assert.doesNotThrow(() => ctx.emit(null, 'agent/pre-step', { step: 1 }))
+  assert.doesNotThrow(() => ctx.emit(null, 'tools/pre-execute', { name: 'bash' }))
+  ctx.registry?.stop?.()
+})
+
+test('prices a schema whose parameters cannot be serialized', async () => {
+  const circular = { type: 'object' }
+  circular.self = circular
+  const { ctx, registered } = await boot({
+    tools: { schemas: () => [{ name: 'loop', description: 'circular params', parameters: circular }] },
+  })
+  const result = reportFor(registered)
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /1 tool ≈ /)
+  assert.match(result.text, /heaviest: loop/)
+  ctx.registry?.stop?.()
+})
+
+test('survives a tools service that throws', async () => {
+  const { ctx, registered } = await boot({
+    tools: { schemas() { throw new Error('tool registry offline') } },
+  })
+  await ctx.waterfall(null, 'agent/pre-step', {}, async () => 'ok')
+
+  const result = reportFor(registered)
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /hot path  1 call/)
+  assert.ok(!result.text.includes('Context tax, per tool definition'))
   ctx.registry?.stop?.()
 })

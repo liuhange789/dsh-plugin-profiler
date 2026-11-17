@@ -21,27 +21,63 @@ const HOT_EVENTS = new Set([
   'tools/result',
 ])
 
+/** Coerce anything to text without trusting a hostile `toString`. */
+function safeText(value) {
+  if (value == null) return ''
+  try {
+    return String(value)
+  } catch {
+    return ''
+  }
+}
+
 /** Estimate prompt tokens for one tool schema (~4 characters per token). */
 export function estimateTokens(schema) {
-  const text = JSON.stringify({
-    name: schema?.name,
-    description: schema?.description,
-    parameters: schema?.parameters,
-  })
-  return Math.ceil(text.length / CHARS_PER_TOKEN)
+  try {
+    const text = JSON.stringify({
+      name: schema?.name,
+      description: schema?.description,
+      parameters: schema?.parameters,
+    })
+    if (typeof text === 'string') return Math.ceil(text.length / CHARS_PER_TOKEN)
+  } catch {
+    // Circular, BigInt or otherwise unserializable parameters: price what we can read.
+  }
+  const fallback = `${safeText(schema?.name)}${safeText(schema?.description)}`
+  return Math.ceil(fallback.length / CHARS_PER_TOKEN)
+}
+
+/** List one `_hooks` table as `[event, hooks]` pairs, tolerating a Map or a hostile object. */
+function hookEntries(hooks) {
+  try {
+    if (hooks instanceof Map) return [...hooks.entries()]
+    if (hooks && typeof hooks === 'object') return Object.entries(hooks)
+  } catch {
+    // A proxy that refuses enumeration simply yields no inventory.
+  }
+  return []
 }
 
 /** Group registered listeners by owning plugin, skipping internal events. */
 export function collectListeners(ctx, selfName) {
-  const hooks = ctx?.events?._hooks
   const byPlugin = new Map()
-  if (!hooks || typeof hooks !== 'object') return byPlugin
-  for (const [event, list] of Object.entries(hooks)) {
+  let hooks
+  try {
+    hooks = ctx?.events?._hooks
+  } catch {
+    return byPlugin
+  }
+  for (const [event, list] of hookEntries(hooks)) {
     if (typeof event !== 'string' || event.startsWith('internal/')) continue
     if (!Array.isArray(list)) continue
     for (const hook of list) {
-      const owner = hook?.ctx?.fiber?.name
-      if (typeof owner !== 'string' || owner === selfName) continue
+      let owner
+      try {
+        owner = hook?.ctx?.fiber?.name
+      } catch {
+        continue
+      }
+      if (typeof owner !== 'string' || owner.length === 0 || owner === selfName) continue
       let events = byPlugin.get(owner)
       if (!events) {
         events = new Map()
@@ -73,14 +109,37 @@ export function formatMs(ms) {
   return `${(ms / 1000).toFixed(2)}s`
 }
 
+/** Double-width code points (CJK, Hangul, fullwidth forms, emoji) so tables stay aligned. */
+const WIDE = /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFE30-\uFE6F\uFF00-\uFF60\uFFE0-\uFFE6]|[\u{1F000}-\u{1FAFF}]/u
+
+function charWidth(ch) {
+  return WIDE.test(ch) ? 2 : 1
+}
+
+function displayWidth(text) {
+  let width = 0
+  for (const ch of text) width += charWidth(ch)
+  return width
+}
+
 function pad(text, width) {
-  const value = String(text)
-  return value.length >= width ? value : value + ' '.repeat(width - value.length)
+  const value = safeText(text)
+  const current = displayWidth(value)
+  return current >= width ? value : value + ' '.repeat(width - current)
 }
 
 function clip(text, width) {
-  const value = String(text)
-  return value.length <= width ? value : `${value.slice(0, width - 1)}…`
+  const value = safeText(text)
+  if (displayWidth(value) <= width) return value
+  let out = ''
+  let used = 0
+  for (const ch of value) {
+    const step = charWidth(ch)
+    if (used + step > width - 1) break
+    out += ch
+    used += step
+  }
+  return `${out}…`
 }
 
 function elapsed(since, now) {
@@ -132,7 +191,7 @@ export function renderReport(state, snapshot, now) {
 
   // The shareable card: three numbers and a cut list, short enough to paste.
   lines.push(`DSH plugin tax · ${elapsed(state.since, now)} observed`)
-  lines.push(`  context   ${schemas.length} tools ≈ ${contextTokens.toLocaleString('en-US')} tokens per request`)
+  lines.push(`  context   ${schemas.length} tool${schemas.length === 1 ? '' : 's'} ≈ ${contextTokens.toLocaleString('en-US')} tokens per request`)
   lines.push(`  hot path  ${hotCalls} call${hotCalls === 1 ? '' : 's'}, ${formatMs(hotMs)} of host work (provider and tool body excluded)`)
   lines.push(`  listeners ${listeners.size} plugin${listeners.size === 1 ? '' : 's'} · ${hotListeners} on hot events`)
   if (fanout.length > 0) {
@@ -167,12 +226,12 @@ export function renderReport(state, snapshot, now) {
   }
 
   if (schemas.length > 0) {
-    const priced = schemas.map(schema => ({ name: String(schema?.name ?? '?'), tokens: estimateTokens(schema) }))
+    const priced = schemas.map(schema => ({ name: safeText(schema?.name) || '?', tokens: estimateTokens(schema) }))
     priced.sort((a, b) => b.tokens - a.tokens)
     const total = priced.reduce((sum, row) => sum + row.tokens, 0)
     lines.push('')
     lines.push('Context tax, per tool definition')
-    lines.push(`${schemas.length} tools ≈ ${total.toLocaleString('en-US')} tokens; heaviest: ${priced.slice(0, 3).map(row => `${row.name} ≈ ${row.tokens}`).join(', ')}`)
+    lines.push(`${schemas.length} tool${schemas.length === 1 ? '' : 's'} ≈ ${total.toLocaleString('en-US')} tokens; heaviest: ${priced.slice(0, 3).map(row => `${row.name} ≈ ${row.tokens}`).join(', ')}`)
     lines.push('  Owner is not exposed by rc.7, so this is per tool, not per plugin.')
   }
 

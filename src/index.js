@@ -12,6 +12,11 @@
  * listeners to `internal/listener` only to allow or refuse registration, and
  * has no post-dispatch hook, so no plugin can time another plugin's callback.
  * See README "What this cannot measure".
+ *
+ * Robustness contract: this plugin never throws into the host. Every listener
+ * body, every command handler and every optional-service call is contained; if
+ * anything it reads is missing or hostile it drops that section and keeps the
+ * rest of the session running.
  */
 
 import {
@@ -29,7 +34,13 @@ const TIMED_CHAINS = [
   ['llm/stream', 'stream interception only, not consumption'],
 ]
 
-const MAX_INFLIGHT = 500
+/** Bounds that keep counters small even after a very long session. */
+const MAX_INFLIGHT = 200
+const MAX_EVENTS = 200
+
+const clock = typeof performance !== 'undefined' && typeof performance.now === 'function'
+  ? () => performance.now()
+  : () => Date.now()
 
 function newState() {
   return {
@@ -41,11 +52,22 @@ function newState() {
   }
 }
 
+/** Read an optional service without ever letting a proxy getter break the load. */
 function optionalService(ctx, key) {
   try {
-    return ctx.get(key, false)
+    const value = ctx.get(key, false)
+    return value && typeof value === 'object' ? value : undefined
   } catch {
     return undefined
+  }
+}
+
+/** Run bookkeeping that must not be able to fail a host dispatch. */
+function safely(work) {
+  try {
+    work()
+  } catch {
+    // A counter can never justify breaking the caller's chain.
   }
 }
 
@@ -71,60 +93,140 @@ function recordTool(state, tool, ms) {
   row.maxMs = Math.max(row.maxMs, ms)
 }
 
+function describeThrown(error) {
+  try {
+    const text = error instanceof Error ? error.message : String(error)
+    return text.length > 160 ? `${text.slice(0, 159)}…` : text
+  } catch {
+    return 'unknown error'
+  }
+}
+
+function warn(ctx, message) {
+  try {
+    ctx.logger?.warn?.(`[plugin-profiler] ${message}`)
+  } catch {
+    // Logging is never load-bearing.
+  }
+}
+
+/** Attach a registered command's disposer to this plugin's fiber, so unload unregisters it. */
+function keepCommandAlive(ctx, dispose) {
+  if (typeof dispose !== 'function') return
+  if (typeof ctx.effect !== 'function') return
+  try {
+    ctx.effect(() => dispose, 'plugin-profiler command')
+  } catch {
+    // If the fiber is already leaving, drop the registration immediately.
+    try {
+      dispose()
+    } catch {
+      // Nothing left to release.
+    }
+  }
+}
+
+function registerCommand(ctx, commands, definition) {
+  try {
+    const dispose = commands.register(definition)
+    keepCommandAlive(ctx, dispose)
+    return true
+  } catch (error) {
+    // A duplicate name (second copy of this plugin, or a foreign /diet) must
+    // cost the command, never the plugin.
+    warn(ctx, `could not register /${definition.name}: ${describeThrown(error)}`)
+    return false
+  }
+}
+
+/** Resolve the tool payload's display name without trusting property access. */
+function toolNameOf(exec) {
+  try {
+    return exec?.name == null ? '?' : String(exec.name)
+  } catch {
+    return '?'
+  }
+}
+
+function callIdOf(exec) {
+  try {
+    return exec?.callId == null ? undefined : String(exec.callId)
+  } catch {
+    return undefined
+  }
+}
+
 export function apply(ctx) {
   const state = newState()
 
   // Every non-internal dispatch, whatever its mode (emit/parallel/serial/bail/waterfall).
   ctx.on('internal/dispatch', (mode, event) => {
-    if (typeof event !== 'string' || event.startsWith('internal/')) return
-    state.dispatches.set(event, (state.dispatches.get(event) ?? 0) + 1)
+    safely(() => {
+      if (typeof event !== 'string' || event.startsWith('internal/')) return
+      const seen = state.dispatches.get(event)
+      if (seen === undefined && state.dispatches.size >= MAX_EVENTS) return
+      state.dispatches.set(event, (seen ?? 0) + 1)
+    })
   }, { global: true })
 
   // Outermost listener: time everything the rest of the chain does, `next()` included.
   // Rest arguments keep this signature-agnostic across the three events.
   for (const [event, note] of TIMED_CHAINS) {
     ctx.on(event, async (...args) => {
-      const next = args.pop()
-      const start = performance.now()
+      const next = args[args.length - 1]
+      // A non-waterfall dispatch (a plain emit of the same name) has no `next`;
+      // pass through instead of trying to call something that is not a function.
+      if (typeof next !== 'function') return next
+      const start = clock()
       try {
         return await next()
       } finally {
-        recordChain(state, event, note, performance.now() - start)
+        safely(() => recordChain(state, event, note, clock() - start))
       }
     }, { prepend: true, global: true })
   }
 
   // Pre-tool gates: time the gate chain and remember when the call started.
   ctx.on('tools/pre-execute', async (...args) => {
-    const next = args.pop()
-    const exec = args[0]
-    const start = performance.now()
-    if (exec && exec.callId != null) {
+    const next = args[args.length - 1]
+    if (typeof next !== 'function') return next
+    const start = clock()
+    safely(() => {
+      const exec = args[0]
+      const callId = callIdOf(exec)
+      if (callId === undefined) return
       if (state.inflight.size >= MAX_INFLIGHT) state.inflight.clear()
-      state.inflight.set(String(exec.callId), {
-        name: String(exec.name ?? '?'),
-        start,
-      })
-    }
+      state.inflight.set(callId, { name: toolNameOf(exec), start })
+    })
     try {
       return await next()
     } finally {
-      recordChain(state, 'tools/pre-execute', 'pre-tool gates', performance.now() - start)
+      safely(() => recordChain(state, 'tools/pre-execute', 'pre-tool gates', clock() - start))
     }
   }, { prepend: true, global: true })
 
   ctx.on('tools/result', (exec) => {
-    if (!exec || exec.callId == null) return
-    const started = state.inflight.get(String(exec.callId))
-    if (!started) return
-    state.inflight.delete(String(exec.callId))
-    recordTool(state, started.name, performance.now() - started.start)
+    safely(() => {
+      const callId = callIdOf(exec)
+      if (callId === undefined) return
+      const started = state.inflight.get(callId)
+      if (!started) return
+      state.inflight.delete(callId)
+      recordTool(state, started.name, clock() - started.start)
+    })
   }, { global: true })
 
   const commands = optionalService(ctx, 'commands')
-  if (commands && typeof commands.register === 'function') {
-    const handler = (invocation) => {
-      const arg = String(invocation?.rawInput ?? '').trim().toLowerCase()
+  if (!commands || typeof commands.register !== 'function') return
+
+  const handler = (invocation) => {
+    try {
+      let arg = ''
+      try {
+        arg = String(invocation?.rawInput ?? '').trim().toLowerCase()
+      } catch {
+        arg = ''
+      }
       if (arg === 'reset') {
         reset(state)
         return { kind: 'success', text: 'Plugin tax counters reset.' }
@@ -138,19 +240,25 @@ export function apply(ctx) {
           selfName: name,
         }, Date.now()),
       }
+    } catch (error) {
+      return {
+        kind: 'error',
+        text: `Plugin tax report failed: ${describeThrown(error)}. Counters are still collecting; try /diet again.`,
+      }
     }
-    // `/diet` is the memorable surface; `/profiler` is kept as an alias.
-    commands.register({
-      name: 'diet',
-      description: 'Plugin tax: context cost, hot path, and uninstall candidates',
-      handler,
-    })
-    commands.register({
-      name: 'profiler',
-      description: 'Alias of /diet',
-      handler,
-    })
   }
+
+  // `/diet` is the memorable surface; `/profiler` is kept as an alias.
+  registerCommand(ctx, commands, {
+    name: 'diet',
+    description: 'Plugin tax: context cost, hot path, and uninstall candidates',
+    handler,
+  })
+  registerCommand(ctx, commands, {
+    name: 'profiler',
+    description: 'Alias of /diet',
+    handler,
+  })
 }
 
 function reset(state) {

@@ -61,6 +61,17 @@ Read this before installing. It is the reason the card says "fan-out is a suspic
 
 If a host seam lands later (a post-registration or post-dispatch hook, plus an owner field on tool records), this plugin can add real per-plugin attribution without changing its report format.
 
+## Robustness
+
+Written so it can never be the reason your host breaks:
+
+- Every listener body is contained: a bookkeeping failure is dropped, never thrown into the chain the host is running.
+- A dispatch with no `next` callback (a plain emit of a waterfall event name) passes through untouched instead of being called as a function.
+- No `commands` service, or a `/diet` name already taken by another copy, costs the command only — counters keep running, `/profiler` is still attempted, and the rest of the session is unaffected.
+- `tools.schemas()` throwing, circular parameter objects, or a proxy that refuses enumeration degrade that one section and leave the rest of the card intact.
+- Counters are bounded (200 in-flight calls, 200 distinct events), so a very long session cannot grow them without limit.
+- Tables are padded by display width, so Chinese, Japanese or emoji plugin names line up like ASCII ones.
+
 ## Usage
 
 Add the package to your DSH plugin list like any other plugin, then:
@@ -88,7 +99,7 @@ DeepSeek Harness `0.1.0-rc.7` (`@deepseek-ai/cordis` 4.x event bus). Node `^22.1
 npm test
 ```
 
-Five tests run against the real vendored cordis runtime: silent degradation, chain timing with two plugins, tool call timing, tool-definition pricing, and reset.
+Ten tests run against the real vendored cordis runtime: silent degradation, chain timing with two plugins, tool call timing, tool-definition pricing, reset, missing commands service, duplicate command name, dispatch without `next`, unserializable tool parameters, and a throwing tools service.
 
 ## License
 
