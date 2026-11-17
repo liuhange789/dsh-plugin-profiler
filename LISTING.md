@@ -41,8 +41,8 @@ The sample above is illustrative; the README uses a real run from the test suite
 
 ## Submission checklist
 
-- [x] `npm test` — 10/10 against rc.7 (real vendored cordis runtime, hostile-input cases included)
+- [x] `npm test` — 13/13 against rc.7 (real cordis runtime, hostile-input and unload cases included)
 - [x] GitHub repo `liuhange789/dsh-plugin-profiler` — public, topics `dsh-plugin, dsh, deepseek-harness, profiler, diagnostics, plugin-tax`, `dsh.bundle` declared, `cordis.patch.yml` shipped
-- [x] `npm publish` — `dsh-plugin-profiler@0.1.1`, public, latest tag
+- [x] `npm publish` — `dsh-plugin-profiler@0.1.2`, public, latest tag
 - [x] plugin-center PR — [awesome-dsh-plugin#16223](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/16223), 1 file (+6 −0)
 - [ ] Submission gate — only failure is `repository is 0.0 days old (needs 1)`; it re-runs by itself, no resubmission needed
