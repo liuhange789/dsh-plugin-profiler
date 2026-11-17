@@ -1,0 +1,39 @@
+{
+  "name": "dsh-plugin-profiler",
+  "version": "0.1.0",
+  "description": "Plugin load audit for DSH: hot event chains, tool execution cost, tool-definition context cost, and per-plugin listener inventory",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "profiler",
+    "performance",
+    "context",
+    "diagnostics"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "test": "node --test tests/profiler.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/liuhange789/dsh-plugin-profiler.git"
+  },
+  "homepage": "https://github.com/liuhange789/dsh-plugin-profiler#readme",
+  "bugs": {
+    "url": "https://github.com/liuhange789/dsh-plugin-profiler/issues"
+  },
+  "author": "liuhange789",
+  "license": "MIT"
+}
