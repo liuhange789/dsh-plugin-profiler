@@ -12,6 +12,14 @@ This is not another benchmark. `dsh-benchup` and `dsh-eval` answer "is DSH good?
 | `dsh-eval` | Does it choose the right tool? | a task suite |
 | this plugin | What is my installed plugin set costing me right now? | the session you are already in |
 
+## Install
+
+```bash
+dsh plugin add dsh-plugin-profiler
+```
+
+The bundle declares its own patch (`cordis.patch.yml`), so the command is the only install step. `/diet` works immediately in the running session.
+
 ## What it reports
 
 | Section | Source | Meaning |
