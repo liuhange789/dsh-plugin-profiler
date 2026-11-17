@@ -25,8 +25,8 @@ The bundle declares its own patch (`cordis.patch.yml`), so the command is the on
 | Section | Source | Meaning |
 | --- | --- | --- |
 | Context tax | `ctx.tools.schemas()` | Estimated tokens for every tool definition sent on each request, plus the heaviest tools |
-| Hot path | prepended `agent/pre-step`, `agent/request`, `tools/pre-execute` listeners | Wall time of the remaining chain, builtins included, provider and tool body excluded |
-| Tool calls | `tools/pre-execute` → `tools/result` | Wall time per tool call, keyed by `callId` |
+| Hot path | prepended `agent/pre-step`, `agent/request`, `llm/stream` setup, `tools/pre-execute` listeners | Wall time of the remaining chain, builtins included, provider and tool body excluded |
+| Tool calls | `tools/pre-execute` → `tools/result` | Wall time per call, keyed by `callId`; includes approval and post-tool work, not only the tool body |
 | Listener fan-out | live `ctx.events._hooks` snapshot | Which plugin registered how many listeners, and how many sit on hot events |
 | Event volume | `internal/dispatch` | How often each event actually fires |
 
@@ -65,7 +65,7 @@ Read this before installing. It is the reason the card says "fan-out is a suspic
 
 - **No per-plugin milliseconds.** rc.7 gives `internal/listener` only a veto over registration (`vendor/cordis/src/events.ts`, `on()` returns a non-null value as the disposer instead of registering), and it has no post-dispatch event. A plugin therefore cannot wrap another plugin's callback. Any tool claiming "plugin A's pre-execute took N ms" on rc.7 is not measuring what it says.
 - **No tool owner.** `tools.register()` stores the definition but not the registering fiber, so the context tax is priced per tool, not per plugin.
-- **Two scopes are intentionally excluded from the tax line.** `llm/stream` is timed only up to interception, not stream consumption, and the provider call dominates it. Tool body time is measured separately under "Tool calls".
+- **Two scopes are intentionally excluded from the tax line.** `llm/stream` is timed only up to interception, not stream consumption, and the provider call dominates it. rc.7 dispatches that event synchronously and iterates the handler's return value, so the listener must stay synchronous; an `async` wrapper would return a Promise and break every model call. Tool body time is measured separately under "Tool calls", which also contains approval and post-tool work.
 
 If a host seam lands later (a post-registration or post-dispatch hook, plus an owner field on tool records), this plugin can add real per-plugin attribution without changing its report format.
 
@@ -77,7 +77,7 @@ Written so it can never be the reason your host breaks:
 - A dispatch with no `next` callback (a plain emit of a waterfall event name) passes through untouched instead of being called as a function.
 - No `commands` service, or a `/diet` name already taken by another copy, costs the command only — counters keep running, `/profiler` is still attempted, and the rest of the session is unaffected.
 - `tools.schemas()` throwing, circular parameter objects, or a proxy that refuses enumeration degrade that one section and leave the rest of the card intact.
-- Counters are bounded (200 in-flight calls, 200 distinct events), so a very long session cannot grow them without limit.
+- Counters are bounded (200 in-flight calls with oldest-first eviction, 200 distinct events, 200 tools), so a very long session cannot grow them without limit. A call that started before `/diet reset` is discarded instead of being backfilled into the empty window.
 - Tables are padded by display width, so Chinese, Japanese or emoji plugin names line up like ASCII ones.
 
 ## Usage
@@ -107,7 +107,7 @@ DeepSeek Harness `0.1.0-rc.7` (`@deepseek-ai/cordis` 4.x event bus). Node `^22.1
 npm test
 ```
 
-Ten tests run against the real vendored cordis runtime: silent degradation, chain timing with two plugins, tool call timing, tool-definition pricing, reset, missing commands service, duplicate command name, dispatch without `next`, unserializable tool parameters, and a throwing tools service.
+Thirteen tests run against a real cordis runtime, loaded from `CORDIS_PATH` when set, otherwise from the `@deepseek-ai/cordis` dev dependency, so a clean clone can verify itself after `npm install`. They cover silent degradation, chain timing with two plugins, tool call timing, tool-definition pricing, reset (including an in-flight call started before it), missing commands service, duplicate command name, dispatch without `next`, unserializable tool parameters, a throwing tools service, the synchronous `llm/stream` return value, and listener removal on unload.
 
 ## License
 

@@ -27,11 +27,16 @@ import {
 
 export const name = 'plugin-profiler'
 
-/** Waterfall events whose remaining chain is timed around `next()`. */
+/**
+ * Waterfall events whose remaining chain is awaited, so `async` is safe.
+ *
+ * `llm/stream` is deliberately absent: rc.7 dispatches it synchronously and
+ * requires the handler to return the AsyncIterable itself. An async wrapper
+ * would hand the caller a Promise and break every model call.
+ */
 const TIMED_CHAINS = [
   ['agent/pre-step', 'before each step'],
   ['agent/request', 'request assembly'],
-  ['llm/stream', 'stream interception only, not consumption'],
 ]
 
 /** Bounds that keep counters small even after a very long session. */
@@ -45,6 +50,8 @@ const clock = typeof performance !== 'undefined' && typeof performance.now === '
 function newState() {
   return {
     since: Date.now(),
+    /** Bumped by `/diet reset`; calls started earlier must not land in the new window. */
+    generation: 0,
     chains: new Map(),
     dispatches: new Map(),
     tools: new Map(),
@@ -85,6 +92,8 @@ function recordChain(state, event, note, ms) {
 function recordTool(state, tool, ms) {
   let row = state.tools.get(tool)
   if (!row) {
+    // Dynamic or renamed tools could otherwise grow this table forever.
+    if (state.tools.size >= MAX_EVENTS) return
     row = { tool, calls: 0, totalMs: 0, maxMs: 0 }
     state.tools.set(tool, row)
   }
@@ -170,38 +179,65 @@ export function apply(ctx) {
   }, { global: true })
 
   // Outermost listener: time everything the rest of the chain does, `next()` included.
-  // Rest arguments keep this signature-agnostic across the three events.
+  // Rest arguments keep this signature-agnostic across both events.
   for (const [event, note] of TIMED_CHAINS) {
     ctx.on(event, async (...args) => {
       const next = args[args.length - 1]
       // A non-waterfall dispatch (a plain emit of the same name) has no `next`;
       // pass through instead of trying to call something that is not a function.
       if (typeof next !== 'function') return next
+      const generation = state.generation
       const start = clock()
       try {
         return await next()
       } finally {
-        safely(() => recordChain(state, event, note, clock() - start))
+        if (generation === state.generation) {
+          safely(() => recordChain(state, event, note, clock() - start))
+        }
       }
     }, { prepend: true, global: true })
   }
+
+  // `llm/stream` is dispatched synchronously and its return value is iterated
+  // with `for await`. Stay synchronous and hand back the iterable unchanged;
+  // only the setup (adapter resolution) is timed, never chunk consumption.
+  ctx.on('llm/stream', (...args) => {
+    const next = args[args.length - 1]
+    if (typeof next !== 'function') return next
+    const generation = state.generation
+    const start = clock()
+    try {
+      return next()
+    } finally {
+      if (generation === state.generation) {
+        safely(() => recordChain(state, 'llm/stream', 'stream setup only, not chunk consumption', clock() - start))
+      }
+    }
+  }, { prepend: true, global: true })
 
   // Pre-tool gates: time the gate chain and remember when the call started.
   ctx.on('tools/pre-execute', async (...args) => {
     const next = args[args.length - 1]
     if (typeof next !== 'function') return next
+    const generation = state.generation
     const start = clock()
     safely(() => {
       const exec = args[0]
       const callId = callIdOf(exec)
       if (callId === undefined) return
-      if (state.inflight.size >= MAX_INFLIGHT) state.inflight.clear()
-      state.inflight.set(callId, { name: toolNameOf(exec), start })
+      if (!state.inflight.has(callId) && state.inflight.size >= MAX_INFLIGHT) {
+        // Drop the oldest call instead of losing every other in-flight one.
+        const oldest = state.inflight.keys().next().value
+        state.inflight.delete(oldest)
+      }
+      state.inflight.set(callId, { name: toolNameOf(exec), start, generation })
     })
     try {
       return await next()
     } finally {
-      safely(() => recordChain(state, 'tools/pre-execute', 'pre-tool gates', clock() - start))
+      if (generation === state.generation) {
+        safely(() => recordChain(state, 'tools/pre-execute', 'pre-tool gates', clock() - start))
+      }
     }
   }, { prepend: true, global: true })
 
@@ -212,6 +248,7 @@ export function apply(ctx) {
       const started = state.inflight.get(callId)
       if (!started) return
       state.inflight.delete(callId)
+      if (started.generation !== state.generation) return
       recordTool(state, started.name, clock() - started.start)
     })
   }, { global: true })
@@ -262,6 +299,7 @@ export function apply(ctx) {
 }
 
 function reset(state) {
+  state.generation += 1
   state.since = Date.now()
   state.chains.clear()
   state.dispatches.clear()

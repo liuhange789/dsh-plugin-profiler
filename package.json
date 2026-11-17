@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-profiler",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Plugin load audit for DSH: hot event chains, tool execution cost, tool-definition context cost, and per-plugin listener inventory",
   "type": "module",
   "main": "src/index.js",
@@ -41,5 +41,8 @@
     "url": "https://github.com/liuhange789/dsh-plugin-profiler/issues"
   },
   "author": "liuhange789",
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.5"
+  }
 }

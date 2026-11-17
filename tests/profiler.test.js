@@ -5,9 +5,26 @@ import test from 'node:test'
 import { apply, name } from '../src/index.js'
 import { estimateTokens } from '../src/report.js'
 
-// The real cordis runtime shipped with DeepSeek Harness 0.1.0-rc.7.
-const CORDIS = process.env.CORDIS_PATH ?? 'D:/新建文件夹/DeepSeek-Harness/vendor/cordis/lib/index.js'
-const { Context } = await import(pathToFileURL(CORDIS).href)
+/**
+ * Load the real cordis runtime. `CORDIS_PATH` wins (the vendored copy shipped
+ * with a local Harness checkout); otherwise the published package; the old
+ * local path is only a last resort so a clean clone still gets a clear error.
+ */
+async function loadCordis() {
+  if (process.env.CORDIS_PATH) return import(pathToFileURL(process.env.CORDIS_PATH).href)
+  try {
+    return await import('@deepseek-ai/cordis')
+  } catch {
+    // Fall through to the vendored path below.
+  }
+  try {
+    return await import(pathToFileURL('D:/新建文件夹/DeepSeek-Harness/vendor/cordis/lib/index.js').href)
+  } catch {
+    throw new Error('cordis is not installed: run `npm install` or set CORDIS_PATH to vendor/cordis/lib/index.js')
+  }
+}
+
+const { Context } = await loadCordis()
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -22,9 +39,9 @@ async function boot(extra = {}) {
   }
   if (extra.commands !== false) ctx.provide('commands', extra.commands ?? commands)
   if (extra.tools) ctx.provide('tools', extra.tools)
-  ctx.plugin({ name, apply })
+  const fiber = ctx.plugin({ name, apply })
   await sleep(0)
-  return { ctx, registered }
+  return { ctx, registered, fiber }
 }
 
 function reportFor(registered) {
@@ -180,4 +197,65 @@ test('survives a tools service that throws', async () => {
   assert.match(result.text, /hot path  1 call/)
   assert.ok(!result.text.includes('Context tax, per tool definition'))
   ctx.registry?.stop?.()
+})
+
+test('returns the AsyncIterable itself for llm/stream, never a Promise', async () => {
+  const { ctx, registered } = await boot()
+  const chunks = [{ type: 'text', text: 'hello' }, { type: 'finish', reason: { kind: 'stop' } }]
+  const stream = {
+    async *[Symbol.asyncIterator]() {
+      for (const chunk of chunks) yield chunk
+    },
+  }
+
+  const outer = ctx.waterfall(null, 'llm/stream', { messages: [] }, () => stream)
+  assert.ok(!(outer instanceof Promise), 'an async wrapper here breaks every model call in rc.7')
+  assert.equal(typeof outer?.[Symbol.asyncIterator], 'function', 'the handler must return the iterable synchronously')
+
+  const seen = []
+  for await (const chunk of outer) seen.push(chunk)
+  assert.deepEqual(seen, chunks, 'the stream must be passed through unchanged')
+
+  const result = reportFor(registered)
+  const row = result.text.split('\n').find(line => line.startsWith('llm/stream'))
+  assert.ok(row, 'llm/stream setup should be timed')
+  assert.match(result.text, /stream setup only, not chunk consumption/)
+  ctx.registry?.stop?.()
+})
+
+test('reset does not backfill a chain that started before it', async () => {
+  const { ctx, registered } = await boot()
+  const release = Promise.withResolvers()
+  const inFlight = ctx.waterfall(null, 'agent/pre-step', {}, async () => {
+    await release.promise
+    return 'ok'
+  })
+
+  const definition = registered.find(item => item.name === 'diet')
+  assert.ok(definition)
+  assert.equal(definition.handler({ rawInput: 'reset' }).kind, 'success')
+
+  release.resolve()
+  await inFlight
+
+  const after = definition.handler({ rawInput: '' })
+  assert.doesNotMatch(after.text, /agent\/pre-step/, 'the pre-reset chain must not enter the new window')
+  assert.match(after.text, /Nothing measured yet/)
+  ctx.registry?.stop?.()
+})
+
+test('stops counting once the plugin fiber is disposed', async () => {
+  const { ctx, registered, fiber } = await boot()
+  const definition = registered.find(item => item.name === 'diet')
+  assert.ok(definition)
+
+  await ctx.waterfall(null, 'agent/pre-step', {}, async () => 'ok')
+  assert.match(definition.handler({ rawInput: '' }).text, /hot path  1 call/)
+
+  await fiber.dispose()
+
+  await ctx.waterfall(null, 'agent/pre-step', {}, async () => 'ok')
+  const after = definition.handler({ rawInput: '' })
+  assert.equal(after.kind, 'success')
+  assert.match(after.text, /hot path  1 call/, 'no listener may survive unload')
 })

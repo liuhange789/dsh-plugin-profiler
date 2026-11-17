@@ -31,6 +31,15 @@ function safeText(value) {
   }
 }
 
+/** Read a tool's name without trusting a hostile getter on the schema object. */
+function schemaName(schema) {
+  try {
+    return safeText(schema?.name) || '?'
+  } catch {
+    return '?'
+  }
+}
+
 /** Estimate prompt tokens for one tool schema (~4 characters per token). */
 export function estimateTokens(schema) {
   try {
@@ -226,7 +235,7 @@ export function renderReport(state, snapshot, now) {
   }
 
   if (schemas.length > 0) {
-    const priced = schemas.map(schema => ({ name: safeText(schema?.name) || '?', tokens: estimateTokens(schema) }))
+    const priced = schemas.map(schema => ({ name: schemaName(schema), tokens: estimateTokens(schema) }))
     priced.sort((a, b) => b.tokens - a.tokens)
     const total = priced.reduce((sum, row) => sum + row.tokens, 0)
     lines.push('')
