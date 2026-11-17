@@ -1,0 +1,3 @@
+- insert:
+    - id: plugin-profiler
+      name: dsh-plugin-profiler
